@@ -1,6 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { DayosLogo } from './DayosLogo';
 import { HoverLoop } from './HoverLoop';
+import {
+  validateUrlFormat,
+  checkWebsiteReachability,
+  ReachabilityStatus
+} from '../utils/urlValidator';
 
 interface UrlEntryPageProps {
   onBackToHome: () => void;
@@ -12,124 +17,81 @@ export const UrlEntryPage: React.FC<UrlEntryPageProps> = ({
   onWebsiteConfirmed
 }) => {
   const [urlInput, setUrlInput] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [formatError, setFormatError] = useState<string | null>(null);
+  const [reachabilityNotice, setReachabilityNotice] = useState<{
+    status: ReachabilityStatus;
+    error?: string;
+    message?: string;
+  } | null>(null);
   const [normalizedUrl, setNormalizedUrl] = useState('');
-  const [stage, setStage] = useState<'entry' | 'confirmed' | 'loading' | 'placeholder_submitted'>('entry');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [loadingStep, setLoadingStep] = useState<number>(0);
+  const [isVerifiedReachable, setIsVerifiedReachable] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
+  const [stage, setStage] = useState<'entry' | 'confirmed' | 'loading'>('entry');
 
-  // Status messages for Phase C Step 3
-  const loadingSteps = [
-    { label: 'REGISTERING TARGET', percent: 33 },
-    { label: 'PREPARING ANALYSIS WORKSPACE', percent: 68 },
-    { label: 'INITIALIZING DEMONSTRATION ENVIRONMENT', percent: 100 }
-  ];
-
-  // Handle Loading Transition
+  // Handle Bounded Loading Transition
   useEffect(() => {
-    let t1: NodeJS.Timeout;
-    let t2: NodeJS.Timeout;
-    let t3: NodeJS.Timeout;
+    let timer: NodeJS.Timeout;
 
     if (stage === 'loading') {
-      setLoadingStep(0);
-      t1 = setTimeout(() => {
-        setLoadingStep(1);
-      }, 700);
-
-      t2 = setTimeout(() => {
-        setLoadingStep(2);
-      }, 1450);
-
-      t3 = setTimeout(() => {
+      timer = setTimeout(() => {
         onWebsiteConfirmed(normalizedUrl);
-      }, 2250);
+      }, 1600);
     }
 
     return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
+      clearTimeout(timer);
     };
   }, [stage, normalizedUrl, onWebsiteConfirmed]);
 
-  // Validate and normalize target URL
-  const validateAndNormalize = (raw: string): { isValid: boolean; normalized?: string; error?: string } => {
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      return { isValid: false, error: 'Please enter a website URL to continue.' };
-    }
-
-    const lower = trimmed.toLowerCase();
-    const forbiddenProtocols = ['javascript:', 'file:', 'data:', 'ftp:', 'vbscript:', 'blob:', 'about:'];
-    for (const proto of forbiddenProtocols) {
-      if (lower.startsWith(proto)) {
-        return {
-          isValid: false,
-          error: `The "${proto}" protocol is unsupported. Please enter a valid HTTP or HTTPS website URL.`
-        };
-      }
-    }
-
-    // Prepend https:// if no scheme is provided
-    let candidate = trimmed;
-    if (!/^https?:\/\//i.test(trimmed)) {
-      candidate = 'https://' + trimmed;
-    }
-
-    try {
-      const parsed = new URL(candidate);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        return { isValid: false, error: 'Only HTTP and HTTPS website protocols are supported.' };
-      }
-
-      if (!parsed.hostname) {
-        return { isValid: false, error: 'Please enter a valid website address with a domain name.' };
-      }
-
-      const hostname = parsed.hostname;
-      if (hostname.startsWith('.') || hostname.endsWith('.') || hostname.includes('..')) {
-        return { isValid: false, error: 'The website domain format is invalid.' };
-      }
-
-      // Check for valid domain, IP, or localhost
-      const isIp = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(hostname);
-      const isLocalhost = hostname === 'localhost';
-      const isDomain = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/.test(hostname);
-
-      if (!isIp && !isLocalhost && !isDomain) {
-        return {
-          isValid: false,
-          error: 'Please enter a valid domain address (e.g., example.com or https://example.com).'
-        };
-      }
-
-      return { isValid: true, normalized: parsed.href };
-    } catch {
-      return {
-        isValid: false,
-        error: 'Unable to parse this website address. Please check for typos and try again.'
-      };
-    }
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
+    if (isValidating) return; // Prevent duplicate submission
 
-    setIsSubmitting(true);
-    setError(null);
+    setFormatError(null);
+    setReachabilityNotice(null);
+    setIsValidating(true);
 
-    const result = validateAndNormalize(urlInput);
-
-    if (!result.isValid) {
-      setError(result.error || 'Invalid URL entered.');
-      setIsSubmitting(false);
+    // 1. Format and safety validation
+    const formatResult = validateUrlFormat(urlInput);
+    if (!formatResult.isValid) {
+      setFormatError(formatResult.error || 'Invalid website address.');
+      setIsValidating(false);
       return;
     }
 
-    setNormalizedUrl(result.normalized!);
-    setIsSubmitting(false);
+    const candidateUrl = formatResult.normalized!;
+    setNormalizedUrl(candidateUrl);
+
+    // 2. Safe, bounded reachability check
+    try {
+      const reachability = await checkWebsiteReachability(candidateUrl, 4000);
+
+      if (reachability.reachable && reachability.status === 'verified') {
+        // Direct verification succeeded
+        setIsVerifiedReachable(true);
+        setReachabilityNotice(null);
+        setIsValidating(false);
+        setStage('confirmed');
+      } else if (reachability.status === 'timeout' || reachability.status === 'http_error') {
+        // Definitively failed reachability (timed out or HTTP error)
+        setFormatError(reachability.error || 'The target website could not be reached.');
+        setIsValidating(false);
+      } else {
+        // cors_inconclusive: Format is valid, but browser CORS prevents verification
+        setIsVerifiedReachable(false);
+        setReachabilityNotice({
+          status: 'cors_inconclusive',
+          error: reachability.error
+        });
+        setIsValidating(false);
+      }
+    } catch {
+      setFormatError('An unexpected error occurred during address verification. Please try again.');
+      setIsValidating(false);
+    }
+  };
+
+  const handleProceedUnverified = () => {
     setStage('confirmed');
   };
 
@@ -139,21 +101,15 @@ export const UrlEntryPage: React.FC<UrlEntryPageProps> = ({
   };
 
   const handleEditUrl = () => {
-    setError(null);
-    setStage('entry');
-  };
-
-  const handleReset = () => {
-    setUrlInput('');
-    setNormalizedUrl('');
-    setError(null);
+    setFormatError(null);
+    setReachabilityNotice(null);
     setStage('entry');
   };
 
   return (
     <div className="min-h-screen bg-[#e5e5e5] text-[#000000] flex flex-col justify-between selection:bg-[#d1ffca] selection:text-[#000000]">
-      {/* 1. Page Header */}
-      <header className="px-6 md:px-10 pt-8 pb-4">
+      {/* 1. Header */}
+      <header className="px-6 md:px-10 pt-7 pb-4">
         <div className="max-w-[1200px] mx-auto flex items-center justify-between">
           <button
             onClick={onBackToHome}
@@ -165,39 +121,39 @@ export const UrlEntryPage: React.FC<UrlEntryPageProps> = ({
 
           <button
             onClick={onBackToHome}
-            className="inline-flex items-center gap-2 bg-white text-[#444444] hover:text-black px-4 py-2 rounded-full font-body text-[14px] font-[500] border border-[#d6d6d6] transition-colors cursor-pointer"
+            className="inline-flex items-center gap-2 bg-white text-[#444444] hover:text-black px-3.5 py-1.5 rounded-[4px] font-body text-xs font-medium border border-[#d2d2d2] transition-colors cursor-pointer"
           >
             <span>←</span>
-            <HoverLoop>Back to Overview</HoverLoop>
+            <span>Back to Overview</span>
           </button>
         </div>
       </header>
 
-      {/* 2. Main Card Content */}
-      <main className="flex-1 px-6 md:px-10 py-12 md:py-16 flex items-center justify-center">
-        <div className="w-full max-w-[760px]">
+      {/* 2. Main Content Container */}
+      <main className="flex-1 px-6 md:px-10 py-10 md:py-14 flex items-center justify-center">
+        <div className="w-full max-w-[680px]">
           {/* State 1: URL Entry Form */}
           {stage === 'entry' && (
-            <div className="bg-white rounded-[32px] p-8 sm:p-12 md:p-16 border border-[#dcdcdc] shadow-sm">
-              <span className="inline-block bg-[#d1ffca] text-black text-[12px] font-mono px-3 py-1 rounded-[64px] font-medium tracking-wider mb-6">
-                WEBOPS / WEBSITE ANALYSIS
+            <div className="bg-white rounded-[8px] p-8 sm:p-12 border border-[#dcdcdc]">
+              <span className="inline-block bg-[#f3f3f3] text-[#555555] text-[11px] font-mono px-2.5 py-0.5 rounded-[3px] font-semibold tracking-wider uppercase mb-5">
+                Target Configuration
               </span>
 
-              <h1 className="font-cond text-[44px] sm:text-[56px] md:text-[68px] font-[700] uppercase tracking-[-0.03em] leading-[0.92] text-black mb-6">
-                LET'S OPTIMIZE<br />YOUR WEBSITE.
+              <h1 className="font-cond text-[38px] sm:text-[46px] md:text-[52px] font-[700] uppercase tracking-[-0.03em] leading-none text-black mb-4">
+                Optimize Your Website
               </h1>
 
-              <p className="font-body text-[16px] md:text-[18px] text-[#444444] leading-[1.4] max-w-[580px] mb-10">
-                Enter your website URL to begin. WebOps is an academic prototype exploring website performance analysis and predictive optimization.
+              <p className="font-body text-sm text-[#555555] leading-relaxed mb-8">
+                Enter your website URL to begin. WebOps will validate the address format and check connectivity before establishing the performance workspace.
               </p>
 
               <form onSubmit={handleSubmit} noValidate>
                 <div className="mb-6">
                   <label
                     htmlFor="website-url"
-                    className="block font-mono text-[12px] font-semibold uppercase tracking-wider text-[#444444] mb-3"
+                    className="block font-mono text-xs font-semibold uppercase tracking-wider text-[#444444] mb-2.5"
                   >
-                    WEBSITE URL
+                    Website URL
                   </label>
 
                   <div className="relative">
@@ -206,94 +162,147 @@ export const UrlEntryPage: React.FC<UrlEntryPageProps> = ({
                       type="text"
                       autoComplete="url"
                       autoFocus
+                      disabled={isValidating}
                       value={urlInput}
                       onChange={(e) => {
                         setUrlInput(e.target.value);
-                        if (error) setError(null);
+                        if (formatError) setFormatError(null);
+                        if (reachabilityNotice) setReachabilityNotice(null);
                       }}
-                      placeholder="https://yourwebsite.com"
-                      aria-invalid={!!error}
-                      aria-describedby={error ? 'url-error url-note' : 'url-note'}
-                      className={`w-full bg-[#f3f3f3] text-black font-mono text-[16px] md:text-[18px] px-5 py-4 rounded-[12px] border transition-all focus:bg-white focus:outline-none ${
-                        error
-                          ? 'border-[#d32f2f] focus:border-[#d32f2f] bg-[#fff8f8]'
-                          : 'border-transparent focus:border-black'
+                      placeholder="https://example.com"
+                      aria-invalid={!!formatError}
+                      aria-describedby={formatError ? 'url-error url-note' : 'url-note'}
+                      className={`w-full bg-[#f8f8f8] text-black font-mono text-sm sm:text-base px-4 py-3.5 rounded-[4px] border transition-colors focus:bg-white focus:outline-none ${
+                        formatError
+                          ? 'border-[#dc2626] focus:border-[#dc2626]'
+                          : 'border-[#d0d0d0] focus:border-black'
                       }`}
                     />
                   </div>
 
-                  {error && (
+                  {/* Immediate Validation Error Alert */}
+                  {formatError && (
                     <div
                       id="url-error"
                       role="alert"
-                      className="mt-3 flex items-start gap-2 text-[#d32f2f] font-body text-[14px] font-medium"
+                      className="mt-3 p-3 bg-[#fff8f8] border border-[#fecaca] rounded-[4px] text-[#b91c1c] font-body text-xs leading-relaxed"
                     >
-                      <span className="text-[16px] leading-tight font-bold">⚠</span>
-                      <span>{error}</span>
+                      <span className="font-semibold mr-1">Validation Error:</span>
+                      {formatError}
+                    </div>
+                  )}
+
+                  {/* Reachability Inconclusive / CORS Notice */}
+                  {reachabilityNotice && reachabilityNotice.status === 'cors_inconclusive' && (
+                    <div
+                      role="alert"
+                      className="mt-4 p-4 bg-[#fbfbfb] border border-[#d8d8d8] rounded-[6px] text-xs font-body text-[#333333] space-y-3"
+                    >
+                      <div className="font-semibold text-black flex items-center gap-2">
+                        <span>Browser Reachability Inconclusive</span>
+                      </div>
+                      <p className="text-[#555555] leading-relaxed">
+                        The URL format is valid, but direct browser connectivity check was blocked by cross-origin security policies (CORS). Without a backend validation proxy, the browser cannot confirm whether this external host is currently online.
+                      </p>
+                      <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={handleProceedUnverified}
+                          className="bg-black text-white hover:bg-[#222222] px-4 py-2 rounded-[4px] font-body text-xs font-medium transition-colors cursor-pointer"
+                        >
+                          Proceed in Simulation Mode (Unverified Target) →
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setReachabilityNotice(null)}
+                          className="border border-[#cccccc] hover:border-black text-black px-3.5 py-2 rounded-[4px] font-body text-xs font-medium transition-colors cursor-pointer"
+                        >
+                          Edit URL
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
 
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 pt-2">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 pt-1">
                   <button
                     type="submit"
-                    disabled={isSubmitting}
-                    className="bg-[#000000] text-white px-8 py-4 rounded-[8px] font-body text-[16px] font-[500] hover:bg-[#222222] transition-colors inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    disabled={isValidating}
+                    className="bg-black text-white px-7 py-3 rounded-[4px] font-body text-sm font-medium hover:bg-[#222222] transition-colors inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                   >
-                    <HoverLoop>Continue</HoverLoop>
-                    <span>→</span>
+                    {isValidating ? (
+                      <>
+                        <span className="w-3.5 h-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin"></span>
+                        <span>Validating target…</span>
+                      </>
+                    ) : (
+                      <>
+                        <HoverLoop>Continue</HoverLoop>
+                        <span>→</span>
+                      </>
+                    )}
                   </button>
 
                   <button
                     type="button"
                     onClick={onBackToHome}
-                    className="border border-[#d0d0d0] text-black px-6 py-4 rounded-[8px] font-body text-[15px] font-[500] hover:border-black transition-colors inline-flex items-center justify-center cursor-pointer"
+                    disabled={isValidating}
+                    className="border border-[#d0d0d0] text-black px-5 py-3 rounded-[4px] font-body text-sm font-medium hover:border-black transition-colors inline-flex items-center justify-center cursor-pointer disabled:opacity-50"
                   >
                     Cancel
                   </button>
                 </div>
               </form>
 
-              <div id="url-note" className="mt-8 pt-6 border-t border-[#f0f0f0] font-body text-[14px] text-[#777777] leading-relaxed">
-                Supported protocols: HTTP, HTTPS. WebOps evaluates observable metrics within simulated research scenarios without making intrusive scans.
+              <div id="url-note" className="mt-8 pt-5 border-t border-[#f0f0f0] font-body text-xs text-[#777777] leading-relaxed">
+                Accepts HTTP and HTTPS protocols. Internal network addresses and private IP ranges are restricted for safety.
               </div>
             </div>
           )}
 
           {/* State 2: Confirmation State */}
           {stage === 'confirmed' && (
-            <div className="bg-white rounded-[32px] p-8 sm:p-12 md:p-16 border border-[#dcdcdc] shadow-sm">
-              <span className="inline-block bg-[#d1ffca] text-black text-[12px] font-mono px-3 py-1 rounded-[64px] font-medium tracking-wider mb-6">
-                URL VERIFIED
+            <div className="bg-white rounded-[8px] p-8 sm:p-12 border border-[#dcdcdc]">
+              <span className="inline-block bg-[#f3f3f3] text-[#555555] text-[11px] font-mono px-2.5 py-0.5 rounded-[3px] font-semibold tracking-wider uppercase mb-5">
+                Target Verification
               </span>
 
-              <h1 className="font-cond text-[44px] sm:text-[56px] md:text-[68px] font-[700] uppercase tracking-[-0.03em] leading-[0.92] text-black mb-6">
-                CONFIRM TARGET<br />WEBSITE.
+              <h1 className="font-cond text-[38px] sm:text-[46px] md:text-[52px] font-[700] uppercase tracking-[-0.03em] leading-none text-black mb-4">
+                Confirm Target Website
               </h1>
 
-              <p className="font-body text-[16px] md:text-[18px] text-[#444444] leading-[1.4] max-w-[580px] mb-8">
-                Please verify the normalized target website address below before confirming.
+              <p className="font-body text-sm text-[#555555] leading-relaxed mb-6">
+                Please review the normalized target address and verification status before initializing the demonstration workspace.
               </p>
 
-              <div className="bg-[#f7f7f7] border border-[#e5e5e5] rounded-[16px] p-6 mb-8">
-                <span className="block font-mono text-[11px] text-[#777777] uppercase tracking-wider mb-2">
-                  NORMALIZED WEBSITE ADDRESS
+              {/* Normalized Address Box */}
+              <div className="bg-[#f9f9f9] border border-[#e5e5e5] rounded-[6px] p-5 mb-5">
+                <span className="block font-mono text-[10px] text-[#777777] uppercase tracking-wider mb-1.5">
+                  Normalized Website Address
                 </span>
-                <div className="font-mono text-[18px] md:text-[22px] font-bold text-black break-all">
+                <div className="font-mono text-base sm:text-lg font-bold text-black break-all">
                   {normalizedUrl}
                 </div>
               </div>
 
-              <div className="bg-[#fcfcfc] border border-[#ededed] rounded-[12px] p-4 mb-8 text-[13px] font-mono text-[#555555] flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-[#d1ffca]"></span>
-                <span>Client-side validation verified. No requests have been dispatched to this domain.</span>
+              {/* Status Note */}
+              <div className="p-3.5 bg-[#fbfbfb] border border-[#eaeaea] rounded-[6px] mb-6 text-xs font-mono text-[#555555]">
+                {isVerifiedReachable ? (
+                  <div className="text-[#15803d]">
+                    ✓ Reachability Verified · Target responded successfully to browser probe.
+                  </div>
+                ) : (
+                  <div className="text-[#666666]">
+                    ● Format Valid · Reachability unverified due to browser cross-origin policy (CORS).
+                  </div>
+                )}
               </div>
 
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                 <button
                   type="button"
                   onClick={handleConfirmWebsite}
-                  className="bg-[#000000] text-white px-8 py-4 rounded-[8px] font-body text-[16px] font-[500] hover:bg-[#222222] transition-colors inline-flex items-center justify-center gap-2 cursor-pointer"
+                  className="bg-black text-white px-7 py-3 rounded-[4px] font-body text-sm font-medium hover:bg-[#222222] transition-colors inline-flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <HoverLoop>Confirm Website</HoverLoop>
                   <span>✓</span>
@@ -302,115 +311,45 @@ export const UrlEntryPage: React.FC<UrlEntryPageProps> = ({
                 <button
                   type="button"
                   onClick={handleEditUrl}
-                  className="border border-[#d0d0d0] text-black px-6 py-4 rounded-[8px] font-body text-[15px] font-[500] hover:border-black transition-colors inline-flex items-center justify-center cursor-pointer"
+                  className="border border-[#d0d0d0] text-black px-5 py-3 rounded-[4px] font-body text-sm font-medium hover:border-black transition-colors inline-flex items-center justify-center cursor-pointer"
                 >
                   Edit Address
                 </button>
               </div>
 
-              <p className="mt-8 pt-6 border-t border-[#f0f0f0] font-body text-[14px] text-[#777777] leading-relaxed">
-                Confirming initializes a dedicated performance workspace. No monitoring, ML prediction, or server infrastructure changes will be performed on the target website.
+              <p className="mt-7 pt-4 border-t border-[#f0f0f0] font-body text-xs text-[#777777] leading-relaxed">
+                Confirming initializes an in-memory performance simulation workspace. No external probes or configuration modifications will be performed on the target website.
               </p>
             </div>
           )}
 
-          {/* State 3: Polished Loading Transition (Phase C Step 3) */}
+          {/* State 3: Minimal, Clean Loading Screen (Section 2 Refinement) */}
           {stage === 'loading' && (
-            <div className="bg-white rounded-[32px] p-8 sm:p-12 md:p-16 border border-[#dcdcdc] shadow-sm text-center">
-              <span className="inline-block bg-[#fff100] text-black text-[12px] font-mono px-3 py-1 rounded-[64px] font-bold tracking-wider mb-6">
-                WORKSPACE INITIALIZATION
-              </span>
+            <div
+              className="flex flex-col items-center justify-center py-24 text-center select-none"
+              role="status"
+              aria-live="polite"
+            >
+              {/* Subtle, elegant loading spinner */}
+              <div className="relative w-7 h-7 mb-4" aria-hidden="true">
+                <div className="w-7 h-7 rounded-full border-2 border-black/15 border-t-black animate-spin motion-reduce:animate-none"></div>
+              </div>
 
-              <h2 className="font-cond text-[38px] sm:text-[48px] md:text-[56px] font-[700] uppercase tracking-[-0.03em] leading-[0.92] text-black mb-4">
-                PREPARING WORKSPACE.
-              </h2>
-
-              <p className="font-body text-[15px] md:text-[17px] text-[#555555] max-w-[500px] mx-auto mb-10">
-                Initializing the performance demonstration environment for <strong className="text-black font-mono">{normalizedUrl}</strong>.
+              {/* Understated loading label in clean, modern sans-serif */}
+              <p className="font-body text-[15px] text-[#444444] font-normal tracking-normal">
+                Preparing workspace…
               </p>
-
-              {/* Progress Container */}
-              <div className="max-w-[460px] mx-auto mb-10">
-                {/* Status Message */}
-                <div className="flex items-center justify-center gap-3 mb-4">
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#000000] animate-pulse"></span>
-                  <span className="font-mono text-sm font-bold tracking-wider text-black">
-                    {loadingSteps[loadingStep].label}
-                  </span>
-                </div>
-
-                {/* Progress Bar */}
-                <div className="w-full bg-[#f0f0f0] h-2.5 rounded-full overflow-hidden p-0.5 border border-[#e5e5e5]">
-                  <div
-                    className="bg-black h-full rounded-full transition-all duration-500 ease-out"
-                    style={{ width: `${loadingSteps[loadingStep].percent}%` }}
-                  ></div>
-                </div>
-
-                <div className="flex justify-between items-center mt-2 text-[11px] font-mono text-[#888888]">
-                  <span>Step {loadingStep + 1} of 3</span>
-                  <span>{loadingSteps[loadingStep].percent}%</span>
-                </div>
-              </div>
-
-              {/* Truthful Boundary Notice */}
-              <div className="bg-[#fcfcfc] border border-[#ededed] rounded-[14px] p-4 text-xs font-mono text-[#666666] max-w-[520px] mx-auto text-left">
-                <span className="font-bold text-black block mb-1">Demonstration Workspace Sandbox:</span>
-                This initialization generates an isolated, in-memory telemetry model. No external probes or server configuration modifications are dispatched to the target.
-              </div>
-
-              <div className="mt-8">
-                <button
-                  type="button"
-                  onClick={() => setStage('confirmed')}
-                  className="text-xs font-mono text-[#888888] hover:text-black transition-colors underline cursor-pointer"
-                >
-                  Cancel and return to verification
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* State 4: Legacy Fallback Placeholder State */}
-          {stage === 'placeholder_submitted' && (
-            <div className="bg-white rounded-[32px] p-8 sm:p-12 md:p-16 border border-[#dcdcdc] shadow-sm">
-              <span className="inline-block bg-[#fff100] text-black text-[12px] font-mono px-3 py-1 rounded-[64px] font-semibold tracking-wider mb-6">
-                PHASE 3A COMPLETE
-              </span>
-
-              <h1 className="font-cond text-[44px] sm:text-[56px] md:text-[68px] font-[700] uppercase tracking-[-0.03em] leading-[0.92] text-black mb-6">
-                WEBSITE REGISTERED<br />FOR ANALYSIS.
-              </h1>
-
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
-                <button
-                  type="button"
-                  onClick={onBackToHome}
-                  className="bg-[#000000] text-white px-8 py-4 rounded-[8px] font-body text-[16px] font-[500] hover:bg-[#222222] transition-colors inline-flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <HoverLoop>Return to Homepage</HoverLoop>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleReset}
-                  className="border border-[#d0d0d0] text-black px-6 py-4 rounded-[8px] font-body text-[15px] font-[500] hover:border-black transition-colors inline-flex items-center justify-center cursor-pointer"
-                >
-                  Analyze Another Website
-                </button>
-              </div>
+              <span className="sr-only">Initializing performance demonstration workspace</span>
             </div>
           )}
         </div>
       </main>
 
       {/* 3. Minimal Footer */}
-      <footer className="px-6 md:px-10 py-6 border-t border-[#d8d8d8] text-xs font-mono text-[#777777]">
-        <div className="max-w-[1200px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+      <footer className="px-6 md:px-10 py-5 border-t border-[#d8d8d8] text-xs font-mono text-[#777777] bg-[#e5e5e5]">
+        <div className="max-w-[1200px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
           <div>© 2026 WebOps Project. College Research &amp; Prototype Demonstration.</div>
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-[#d1ffca] animate-pulse"></span>
-            <span>ACADEMIC PROTOTYPE</span>
-          </div>
+          <div>ACADEMIC PROTOTYPE</div>
         </div>
       </footer>
     </div>
